@@ -62,7 +62,7 @@ public interface DishMapper {
     void update(Dish dish);
 
 
-    List<Dish> getByCategoryId(Dish dish);
+    List<Dish> list(Dish dish);
 
     /**
      * 根据套餐id查询菜品

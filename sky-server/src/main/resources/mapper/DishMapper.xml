@@ -38,7 +38,7 @@
     </select>
 
 
-    <select id="getByCategoryId" resultType="com.sky.entity.Dish">
+    <select id="list" resultType="com.sky.entity.Dish">
         select * from dish
         <where>
             <if test="name != null">
