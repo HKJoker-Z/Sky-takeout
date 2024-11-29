@@ -15,6 +15,7 @@ import com.sky.exception.ShoppingCartBusinessException;
 import com.sky.mapper.*;
 import com.sky.result.PageResult;
 import com.sky.service.OrderService;
+import com.sky.utils.RedisLockUtil;
 import com.sky.vo.OrderPaymentVO;
 import com.sky.vo.OrderStatisticsVO;
 import com.sky.vo.OrderSubmitVO;
@@ -29,6 +30,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Service
@@ -52,6 +54,9 @@ public class OrderServiceImpl implements OrderService {
     @Autowired
     private WebSocketServer webSocketServer;
 
+    @Autowired
+    private RedisLockUtil redisLockUtil;
+
     private Orders orders;
 
     /**
@@ -70,6 +75,7 @@ public class OrderServiceImpl implements OrderService {
         }
 
         Long id = BaseContext.getCurrentId();//获取userId
+
         ShoppingCart shoppingCart = new ShoppingCart();
         shoppingCart.setUserId(id);
         List<ShoppingCart> list = shoppingCartMapper.list(shoppingCart);//购物车list
@@ -78,42 +84,58 @@ public class OrderServiceImpl implements OrderService {
             throw new ShoppingCartBusinessException(MessageConstant.SHOPPING_CART_IS_NULL);
         }
 
-        //向订单表插入一条数据
-        Orders orders = new Orders();
-        BeanUtils.copyProperties(ordersSubmitDTO, orders);
-        orders.setOrderTime(LocalDateTime.now());
-        orders.setPayStatus(Orders.UN_PAID);
-        orders.setStatus(Orders.PENDING_PAYMENT);
-        orders.setNumber( String.valueOf(System.currentTimeMillis()) );
-        orders.setPhone(addressBook.getPhone());
-        orders.setConsignee(addressBook.getConsignee());
-        orders.setUserId(id);
-        this.orders = orders;
 
-        orderMapper.insert(orders);
+        String lockKey = "order:submit:" + id;
+        String lockValue = String.valueOf(System.currentTimeMillis() + 10000); // 10 seconds timeout
 
-        List<OrderDetail> orderDetailList = new ArrayList<>();
-        //向订单明细表插入n条数据
-        for (ShoppingCart cart : list){
-            OrderDetail orderDetail = new OrderDetail();//订单明细
-            BeanUtils.copyProperties(cart, orderDetail);
-            orderDetail.setOrderId(orders.getId());//设置当前订单明细关联的订单id
-            orderDetailList.add(orderDetail);
+        boolean acquired = redisLockUtil.tryLock(lockKey, lockValue, 10, TimeUnit.SECONDS);
+
+        if (!acquired) {
+            throw new OrderBusinessException("Duplicate order submission detected");
         }
-        orderDetailMapper.insertBatch(orderDetailList);
 
-        //清除购物车
-        shoppingCartMapper.deleteByUserId(id);
+        // Redis-based distributed lock
+        try {
 
-        //封装vo 返回结果
-        OrderSubmitVO orderSubmitVO = OrderSubmitVO.builder()
-                .id(orders.getId())
-                .orderTime(orders.getOrderTime())
-                .orderNumber(orders.getNumber())
-                .orderAmount(orders.getAmount())
-                .build();
+            //向订单表插入一条数据
+            Orders orders = new Orders();
+            BeanUtils.copyProperties(ordersSubmitDTO, orders);
+            orders.setOrderTime(LocalDateTime.now());
+            orders.setPayStatus(Orders.UN_PAID);
+            orders.setStatus(Orders.PENDING_PAYMENT);
+            orders.setNumber( String.valueOf(System.currentTimeMillis()) );
+            orders.setPhone(addressBook.getPhone());
+            orders.setConsignee(addressBook.getConsignee());
+            orders.setUserId(id);
+            this.orders = orders;
 
-        return null;
+            orderMapper.insert(orders);
+
+            List<OrderDetail> orderDetailList = new ArrayList<>();
+            //向订单明细表插入n条数据
+            for (ShoppingCart cart : list){
+                OrderDetail orderDetail = new OrderDetail();//订单明细
+                BeanUtils.copyProperties(cart, orderDetail);
+                orderDetail.setOrderId(orders.getId());//设置当前订单明细关联的订单id
+                orderDetailList.add(orderDetail);
+            }
+            orderDetailMapper.insertBatch(orderDetailList);
+
+            //清除购物车
+            shoppingCartMapper.deleteByUserId(id);
+
+            //封装vo 返回结果
+            OrderSubmitVO orderSubmitVO = OrderSubmitVO.builder()
+                    .id(orders.getId())
+                    .orderTime(orders.getOrderTime())
+                    .orderNumber(orders.getNumber())
+                    .orderAmount(orders.getAmount())
+                    .build();
+
+            return orderSubmitVO;
+        } finally {
+            redisLockUtil.unlock(lockKey, lockValue);
+        }
     }
 
     @Override
